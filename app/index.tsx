@@ -1,11 +1,12 @@
 import { useRouter } from 'expo-router'
 import React from 'react'
-import { StyleSheet, Text, TouchableOpacity, View } from 'react-native'
+import { Image, StyleSheet, Text, TouchableOpacity, View } from 'react-native'
 
 export default function Landing() {
   const router = useRouter()
   return (
     <View style={s.container}>
+      <Image source={require('../assets/cit-logo.png')} style={s.logo} />
       <Text style={s.title}>Welcome</Text>
       <Text style={s.subtitle}>Choose your portal</Text>
 
@@ -23,10 +24,23 @@ export default function Landing() {
 }
 
 const s = StyleSheet.create({
-  container: { flex: 1, justifyContent: 'center', padding: 24, backgroundColor: '#fff' },
-  title: { fontSize: 28, fontWeight: '800', textAlign: 'center' },
-  subtitle: { fontSize: 14, textAlign: 'center', color: '#555', marginBottom: 20 },
-  row: { flexDirection: 'row', gap: 12, justifyContent: 'center' },
-  card: { paddingVertical: 18, paddingHorizontal: 16, borderRadius: 10, minWidth: 150 },
-  cardTxt: { color: '#fff', textAlign: 'center', fontWeight: '700' }
+  container: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingHorizontal: 32,
+    paddingVertical: 32,
+    backgroundColor: '#fff'
+  },
+  logo: {
+    width: 300,
+    height: 170,
+    marginBottom: 32,
+    resizeMode: 'contain'
+  },
+  title: { fontSize: 30, fontWeight: '800', textAlign: 'center', marginBottom: 8 },
+  subtitle: { fontSize: 16, textAlign: 'center', color: '#', marginBottom: 28 },
+  row: { flexDirection: 'row', gap: 16, justifyContent: 'center', marginTop: 8 },
+  card: { paddingVertical: 20, paddingHorizontal: 28, borderRadius: 12, minWidth: 200, marginHorizontal: 8 },
+  cardTxt: { color: '#fff', textAlign: 'center', fontWeight: '700', fontSize: 15 }
 })

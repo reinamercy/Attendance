@@ -1,11 +1,11 @@
-//app/admin/attendance.tsx//-----------------------------------------------------------------------------------------------------------------------------------
+// app/admin/attendance.tsx
 import { Buffer } from 'buffer';
-(global as any).Buffer = Buffer
+(global as any).Buffer = Buffer;
 
 import Checkbox from 'expo-checkbox';
 import * as DocumentPicker from 'expo-document-picker';
 import * as FileSystem from 'expo-file-system';
-import { useFocusEffect, useLocalSearchParams, useRouter } from 'expo-router';
+import { useLocalSearchParams, useRouter } from 'expo-router';
 import React, { useEffect, useState } from 'react';
 import {
   Alert,
@@ -20,7 +20,7 @@ import {
   View
 } from 'react-native';
 
-// IMPORTANT: style-aware XLSX//-----------------------------------------------------------------------------------------------------------------------------------
+// IMPORTANT: style-aware XLSX
 import XLSX from 'xlsx-js-style';
 
 import dayjs from 'dayjs';
@@ -39,133 +39,157 @@ import {
 } from 'firebase/firestore';
 import { db } from '../../firebase';
 
+const norm = (x: any) => (x ?? '').toString().trim().toUpperCase();
+
 interface Student {
-  key: string
-  NAME: string
-  ROLLNO: string
-  EMAIL: string
-  CLASS: string
-  present: boolean
-  absent: boolean
-  mentor?: string
+  key: string;
+  NAME: string;
+  ROLLNO: string;
+  EMAIL: string;
+  CLASS: string;
+  present: boolean;
+  absent: boolean;
+  mentor?: string;
 }
 
 export default function AdminAttendance() {
-  const { cls, mentor } = useLocalSearchParams<{ cls: string; mentor: string }>()
-  const router = useRouter()
+  // Normalize route params to stable strings
+  const params = useLocalSearchParams() as { cls?: string | string[]; mentor?: string | string[] };
+  const one = (v?: string | string[]) => (Array.isArray(v) ? v[0] : v) ?? '';
+  const CLS = one(params.cls).trim();
+  const MENTOR = one(params.mentor).trim();
 
-  const [students, setStudents] = useState<Student[]>([])
-  const [showAddModal, setShowAddModal] = useState(false)
-  const [newName, setNewName] = useState('')
-  const [newRoll, setNewRoll] = useState('')
-  const [newEmail, setNewEmail] = useState('')
-  const [success, setSuccess] = useState(false)
+  const router = useRouter();
 
-  const [selectedDate, setSelectedDate] = useState(dayjs().format('YYYY-MM-DD'))
-  const [savingDay, setSavingDay] = useState(false)
-  const [savedTick, setSavedTick] = useState(false)
+  const [students, setStudents] = useState<Student[]>([]);
+  const [showAddModal, setShowAddModal] = useState(false);
+  const [newName, setNewName] = useState('');
+  const [newRoll, setNewRoll] = useState('');
+  const [newEmail, setNewEmail] = useState('');
+  const [success, setSuccess] = useState(false);
 
-  // Load roster for this class//-----------------------------------------------------------------------------------------------------------------------------------
+  const [selectedDate, setSelectedDate] = useState(dayjs().format('YYYY-MM-DD'));
+  const [savingDay, setSavingDay] = useState(false);
+  const [savedTick, setSavedTick] = useState(false);
+
+  // Load roster + attendance for the selected date
   useEffect(() => {
-    const fetchStudents = async () => {
-      if (!cls) return
-      const qy = query(collection(db, 'students'), where('CLASS', '==', cls))
-      const snapshot = await getDocs(qy)
-      const loaded = snapshot.docs.map(d => ({
-        ...(d.data() as any),
-        key: d.id
-      })) as Student[]
-      
-      setStudents(loaded)
-    }
-    fetchStudents()
-  }, [cls])
+    if (!CLS) return;
+    const fetchData = async () => {
+      // 1) roster
+      const qy = query(collection(db, 'students'), where('CLASS', '==', CLS));
+      const snapshot = await getDocs(qy);
+      const baseStudents = snapshot.docs.map(d => {
+        const dat = d.data() as any;
+        return {
+          ...dat,
+          ROLLNO: norm(dat.ROLLNO),
+          NAME: (dat.NAME ?? '').toString().trim(),
+          EMAIL: (dat.EMAIL ?? '').toString().trim(),
+          CLASS: (dat.CLASS ?? '').toString().trim(),
+          key: d.id
+        } as Student;
+      });
 
-  useFocusEffect(
-    React.useCallback(() => {
-      setSelectedDate(dayjs().format('YYYY-MM-DD'))
-    }, [])
-  )
+      // 2) per-day marks
+      const id = `${CLS}__${selectedDate}`;
+      const ref = doc(db, 'attendance', id);
+      const snap = await getDoc(ref);
+      console.log('[LOAD]', id, 'exists:', snap.exists());
 
-  const loadAttendanceForDate = async () => {
-    if (!cls || students.length === 0) return
-    const id = `${cls}__${selectedDate}`
-    const ref = doc(db, 'attendance', id)
-    const snap = await getDoc(ref)
-    if (!snap.exists()) {
-      setStudents(prev => prev.map(s => ({ ...s, present: false, absent: false })))
-      return
-    }
-    const data = snap.data() as any
-    const marks = data?.marks || {}
-    setStudents(prev =>
-      prev.map(s => {
-        const byRoll = marks[s.ROLLNO] || {}
-        return { ...s, present: !!byRoll.present, absent: !!byRoll.absent }
-      })
-    )
-  }
+      if (!snap.exists()) {
+        setStudents(baseStudents.map(s => ({ ...s, present: false, absent: false })));
+        return;
+      }
 
-  useEffect(() => {
-    if (students.length) loadAttendanceForDate()
+      const data = snap.data() as any;
+      const marks = data?.marks || {};
+      console.log('[LOAD_MARKS]', Object.keys(marks).length, Object.keys(marks).slice(0, 3));
+      setStudents(
+        baseStudents.map(s => {
+          const byRoll = marks[norm(s.ROLLNO)] || {};
+          return { ...s, present: !!byRoll.present, absent: !!byRoll.absent };
+        })
+      );
+    };
+    fetchData();
+  }, [selectedDate, CLS]);
 
-  }, [selectedDate, students.length])
-
-  // Save roster-----------------------------------------------------------------------------------------------------------------------------------------
+  // Save roster
   const saveStudents = async () => {
-    const qy = query(collection(db, 'students'), where('CLASS', '==', cls))
-    const snapshot = await getDocs(qy)
+    const qy = query(collection(db, 'students'), where('CLASS', '==', CLS));
+    const snapshot = await getDocs(qy);
     for (let d of snapshot.docs) {
-      await deleteDoc(doc(db, 'students', d.id))
+      await deleteDoc(doc(db, 'students', d.id));
     }
     for (let stu of students) {
-      const { key, ...data } = stu
-      await addDoc(collection(db, 'students'), { ...data, mentor })
+      const { key, ...data } = stu;
+      await addDoc(collection(db, 'students'), {
+        ...data,
+        ROLLNO: norm(data.ROLLNO),
+        NAME: (data.NAME ?? '').toString().trim(),
+        EMAIL: (data.EMAIL ?? '').toString().trim(),
+        CLASS: CLS,
+        mentor: MENTOR
+      });
     }
-    setSuccess(true)
+    setSuccess(true);
     setTimeout(() => {
-      setSuccess(false)
-      router.replace({ pathname: '/admin/dashboard', params: { mentor } })
-    }, 1200)
-  }
+      setSuccess(false);
+      router.replace({ pathname: '/admin/dashboard', params: { mentor: MENTOR } });
+    }, 1200);
+  };
 
-  // Save per-day attendance-----------------------------------------------------------------------------------------------------------------------------------------
+  // Save per-day attendance
   const saveAttendanceForDate = async () => {
-    if (!cls) return
-    setSavingDay(true)
+    if (!CLS) return;
+    setSavingDay(true);
     try {
-      const marks: Record<string, { present: boolean; absent: boolean }> = {}
+      const marks: Record<string, { present: boolean; absent: boolean }> = {};
       for (const s of students) {
-        marks[s.ROLLNO] = { present: !!s.present, absent: !!s.absent }
+        const r = norm(s.ROLLNO);
+        if (!r) continue;
+        marks[r] = { present: !!s.present, absent: !!s.absent };
       }
-      const id = `${cls}__${selectedDate}`
-      const ref = doc(db, 'attendance', id)
+      const id = `${CLS}__${selectedDate}`;
+      console.log('[SAVE]', id, 'marks:', Object.keys(marks).length, Object.keys(marks).slice(0, 3));
+      const ref = doc(db, 'attendance', id);
       await setDoc(ref, {
-        CLASS: cls,
+        CLASS: CLS,
         DATE: selectedDate,
-        mentor: mentor ?? '',
+        mentor: MENTOR,
         updatedAt: Date.now(),
         marks
-      })
-      setSavedTick(true)
-      setTimeout(() => setSavedTick(false), 1000)
-    } catch {
-      Alert.alert('Save failed', 'Could not save attendance for this date.')
-    } finally {
-      setSavingDay(false)
-    }
-  }
+      }); // overwrite full doc for this date
 
-  // Excel export -----------------------------------------------------------------------------------------------------------------------------------------
+      const verify = await getDoc(ref);
+      console.log(
+        '[VERIFY_AFTER_SAVE]',
+        id,
+        'exists:',
+        verify.exists(),
+        'marks:',
+        verify.data()?.marks && Object.keys(verify.data()?.marks).length
+      );
+
+      setSavedTick(true);
+      setTimeout(() => setSavedTick(false), 1000);
+    } catch (e) {
+      console.error(e);
+      Alert.alert('Save failed', 'Could not save attendance for this date.');
+    } finally {
+      setSavingDay(false);
+    }
+  };
+
+  // Excel export
   const downloadAttendanceExcel = () => {
     if (!students.length) {
-      Alert.alert('No data', 'No students to export.')
-      return
+      Alert.alert('No data', 'No students to export.');
+      return;
     }
 
-    const rows: any[][] = [
-      ['SNO', 'NAME', 'ROLLNO', 'EMAIL', 'CLASS', 'DATE', 'Present', 'Absent']
-    ]
+    const rows: any[][] = [['SNO', 'NAME', 'ROLLNO', 'EMAIL', 'CLASS', 'DATE', 'Present', 'Absent']];
     students.forEach((s, idx) => {
       rows.push([
         idx + 1,
@@ -176,135 +200,138 @@ export default function AdminAttendance() {
         selectedDate,
         s.present ? 'P' : '',
         s.absent ? 'A' : ''
-      ])
-    })
+      ]);
+    });
 
-    const wb = XLSX.utils.book_new()
-    const ws = XLSX.utils.aoa_to_sheet(rows)
+    const wb = XLSX.utils.book_new();
+    const ws = XLSX.utils.aoa_to_sheet(rows);
 
-    ;(ws as any)['!cols'] = [
-      { wch: 5 }, { wch: 22 }, { wch: 12 }, { wch: 26 },
-      { wch: 10 }, { wch: 12 }, { wch: 10 }, { wch: 10 }
-    ]
+    (ws as any)['!cols'] = [
+      { wch: 5 },
+      { wch: 22 },
+      { wch: 12 },
+      { wch: 26 },
+      { wch: 10 },
+      { wch: 12 },
+      { wch: 10 },
+      { wch: 10 }
+    ];
 
-    // Header bold------------------------------------------------------------------------------------------------------------------------------------------
-    const header = ['A1','B1','C1','D1','E1','F1','G1','H1']
+    const header = ['A1', 'B1', 'C1', 'D1', 'E1', 'F1', 'G1', 'H1'];
     header.forEach(addr => {
       if ((ws as any)[addr]) {
-        ;(ws as any)[addr].s = {
+        (ws as any)[addr].s = {
           font: { bold: true },
           alignment: { horizontal: 'center', vertical: 'center' }
-        }
+        };
       }
-    })
+    });
 
     students.forEach((s, idx) => {
-      const r = idx + 2
-      const presentAddr = `G${r}`
-      const absentAddr  = `H${r}`
+      const r = idx + 2;
+      const presentAddr = `G${r}`;
+      const absentAddr = `H${r}`;
 
       if ((ws as any)[presentAddr] && s.present) {
-        ;(ws as any)[presentAddr].s = {
-          fill: { patternType: 'solid', fgColor: { rgb: '92D050' } }, // green
+        (ws as any)[presentAddr].s = {
+          fill: { patternType: 'solid', fgColor: { rgb: '92D050' } },
           font: { color: { rgb: 'FFFFFF' }, bold: true },
           alignment: { horizontal: 'center' }
-        }
+        };
       }
       if ((ws as any)[absentAddr] && s.absent) {
-        ;(ws as any)[absentAddr].s = {
-          fill: { patternType: 'solid', fgColor: { rgb: 'FF0000' } }, // red
+        (ws as any)[absentAddr].s = {
+          fill: { patternType: 'solid', fgColor: { rgb: 'FF0000' } },
           font: { color: { rgb: 'FFFFFF' }, bold: true },
           alignment: { horizontal: 'center' }
-        }
+        };
       }
-    })
+    });
 
-    XLSX.utils.book_append_sheet(wb, ws, 'Attendance')
+    XLSX.utils.book_append_sheet(wb, ws, 'Attendance');
 
-    // Web download--------------------------------------------------------------------------------------------------------------------------------------------
-    const wbout = XLSX.write(wb, { bookType: 'xlsx', type: 'array' })
+    const wbout = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
     if (Platform.OS === 'web') {
-      const blob = new Blob([wbout], { type: 'application/octet-stream' })
-      const url = URL.createObjectURL(blob)
-      const a = document.createElement('a')
-      a.href = url
-      a.download = `${cls || 'class'}_${selectedDate}_attendance.xlsx`
-      a.click()
-      URL.revokeObjectURL(url)
+      const blob = new Blob([wbout], { type: 'application/octet-stream' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `${CLS || 'class'}_${selectedDate}_attendance.xlsx`;
+      a.click();
+      URL.revokeObjectURL(url);
     } else {
-      Alert.alert('Download', 'Web download ready. For native, we can add FileSystem + Share next.')
+      Alert.alert('Download', 'Web download ready. For native, we can add FileSystem + Share next.');
     }
-  }
+  };
 
-  // Import Excel (native)-----------------------------------------------------------------------------------------------------------------------------------
+  // Import Excel (native)
   const importExcelNative = async () => {
     const res = (await DocumentPicker.getDocumentAsync({
       type: ['application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'],
       copyToCacheDirectory: true
-    })) as any
-    if (res.type === 'cancel') return
-    const name = res.name ?? ''
+    })) as any;
+    if (res.type === 'cancel') return;
+    const name = res.name ?? '';
     if (!name.toLowerCase().endsWith('.xlsx')) {
-      return Alert.alert('Invalid file', 'Please select a .xlsx file')
+      return Alert.alert('Invalid file', 'Please select a .xlsx file');
     }
     try {
-      const uri: string = res.uri
+      const uri: string = res.uri;
       const b64 = await FileSystem.readAsStringAsync(uri, {
         encoding: FileSystem.EncodingType.Base64
-      })
-      const wb = XLSX.read(b64, { type: 'base64' })
-      const ws = wb.Sheets[wb.SheetNames[0]]
-      const data = XLSX.utils.sheet_to_json<any>(ws)
+      });
+      const wb = XLSX.read(b64, { type: 'base64' });
+      const ws = wb.Sheets[wb.SheetNames[0]];
+      const data = XLSX.utils.sheet_to_json<any>(ws);
       setStudents(
         data.map((d, i) => ({
           key: `${Date.now()}-${i}`,
           NAME: d.NAME ?? '',
-          ROLLNO: d.ROLLNO ?? '',
+          ROLLNO: norm(d.ROLLNO ?? ''),
           EMAIL: d.EMAIL ?? '',
-          CLASS: d.CLASS ?? cls ?? '',
-
-          //DATE: d.CLASS ?? cls ?? "",
+          CLASS: CLS,
           present: false,
           absent: false,
-          mentor: mentor ?? ''
+          mentor: MENTOR
         }))
-      )
+      );
     } catch {
-      Alert.alert('Parse error', 'Could not parse this file.')
+      Alert.alert('Parse error', 'Could not parse this file.');
     }
-  }
+  };
 
+  // Import Excel (web)
   const handleWebFile = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0]
-    if (!file) return
+    const file = e.target.files?.[0];
+    if (!file) return;
     if (!file.name.toLowerCase().endsWith('.xlsx')) {
-      return Alert.alert('Invalid file', 'Please select a .xlsx file')
+      return Alert.alert('Invalid file', 'Please select a .xlsx file');
     }
-    const reader = new FileReader()
+    const reader = new FileReader();
     reader.onload = ev => {
-      const b64 = (ev.target?.result as string).split(',')[1]
+      const b64 = (ev.target?.result as string).split(',')[1];
       try {
-        const wb = XLSX.read(b64, { type: 'base64' })
-        const ws = wb.Sheets[wb.SheetNames[0]]
-        const data = XLSX.utils.sheet_to_json<any>(ws)
+        const wb = XLSX.read(b64, { type: 'base64' });
+        const ws = wb.Sheets[wb.SheetNames[0]];
+        const data = XLSX.utils.sheet_to_json<any>(ws);
         setStudents(
           data.map((d, i) => ({
             key: `${Date.now()}-${i}`,
             NAME: d.NAME ?? '',
-            ROLLNO: d.ROLLNO ?? '',
+            ROLLNO: norm(d.ROLLNO ?? ''),
             EMAIL: d.EMAIL ?? '',
-            CLASS: d.CLASS ?? cls ?? '',
+            CLASS: CLS,
             present: false,
             absent: false,
-            mentor: mentor ?? ''
+            mentor: MENTOR
           }))
-        )
+        );
       } catch {
-        Alert.alert('Parse error', 'Could not parse this file.')
+        Alert.alert('Parse error', 'Could not parse this file.');
       }
-    }
-    reader.readAsDataURL(file)
-  }
+    };
+    reader.readAsDataURL(file);
+  };
 
   const toggle = (key: string, field: 'present' | 'absent') =>
     setStudents(prev =>
@@ -313,39 +340,43 @@ export default function AdminAttendance() {
           ? {
               ...s,
               [field]: !s[field],
-            //  ... (field === "absent ? { present: false } : { absent: false }),")
               ...(field === 'present' ? { absent: false } : { present: false })
             }
           : s
       )
-    )
-  const deleteStudent = (key: string) => setStudents(prev => prev.filter(s => s.key !== key))
+    );
+
+  const deleteStudent = (key: string) => setStudents(prev => prev.filter(s => s.key !== key));
+
   const confirmAddStudent = () => {
-    if (!newName.trim() || !newRoll.trim() || !newEmail.trim()) return
+    if (!newName.trim() || !newRoll.trim() || !newEmail.trim()) return;
+
     const student: Student = {
       key: `${Date.now()}`,
       NAME: newName.trim(),
-      ROLLNO: newRoll.trim(),
+      ROLLNO: norm(newRoll),
       EMAIL: newEmail.trim(),
-      CLASS: cls ?? '',
+      CLASS: CLS,
       present: false,
       absent: false,
-      mentor: mentor ?? ''
-    }
-    setStudents(prev => [...prev, student])
-    setNewName('')
-    setNewRoll('')
-    setNewEmail('')
-    setShowAddModal(false)
-  }
-  const COLUMNS = ['SNO', 'NAME', 'ROLLNO', 'EMAIL', 'CLASS', 'Present', 'Absent', 'Del']
+      mentor: MENTOR
+    };
+
+    setStudents(prev => [...prev, student]);
+    setNewName('');
+    setNewRoll('');
+    setNewEmail('');
+    setShowAddModal(false);
+  };
+
+  const COLUMNS = ['SNO', 'NAME', 'ROLLNO', 'EMAIL', 'CLASS', 'Present', 'Absent', 'Del'];
+
   return (
     <SafeAreaView style={s.container}>
-
       <View style={s.topBar}>
         <View style={{ flexDirection: 'row', alignItems: 'center' }}>
-          <Text style={s.topText}>Class: {cls}</Text>
-          <Text style={s.topText}>Mentor: {mentor}</Text>
+          <Text style={s.topText}>Class: {CLS}</Text>
+          <Text style={s.topText}>Mentor: {MENTOR}</Text>
         </View>
 
         <View style={s.topActions}>
@@ -385,7 +416,6 @@ export default function AdminAttendance() {
         contentContainerStyle={{ paddingBottom: 140 }}
         keyboardShouldPersistTaps="handled"
       >
-
         <View style={{ paddingHorizontal: 12, paddingTop: 6 }}>
           <Calendar
             markedDates={{ [selectedDate]: { selected: true } }}
@@ -400,7 +430,6 @@ export default function AdminAttendance() {
           />
         </View>
 
-
         <TouchableOpacity
           style={[s.saveDayBtn, savingDay && { opacity: 0.6 }]}
           onPress={saveAttendanceForDate}
@@ -411,7 +440,6 @@ export default function AdminAttendance() {
           </Text>
         </TouchableOpacity>
 
-   
         <ScrollView horizontal showsHorizontalScrollIndicator style={s.grid}>
           <View>
             <View style={s.rowHeader}>
@@ -423,11 +451,21 @@ export default function AdminAttendance() {
             </View>
             {students.map((stu, idx) => (
               <View key={stu.key} style={s.row}>
-                <View style={s.cell}><Text>{idx + 1}</Text></View>
-                <View style={s.cell}><Text>{stu.NAME}</Text></View>
-                <View style={s.cell}><Text>{stu.ROLLNO}</Text></View>
-                <View style={s.cell}><Text>{stu.EMAIL}</Text></View>
-                <View style={s.cell}><Text>{stu.CLASS}</Text></View>
+                <View style={s.cell}>
+                  <Text>{idx + 1}</Text>
+                </View>
+                <View style={s.cell}>
+                  <Text>{stu.NAME}</Text>
+                </View>
+                <View style={s.cell}>
+                  <Text>{stu.ROLLNO}</Text>
+                </View>
+                <View style={s.cell}>
+                  <Text>{stu.EMAIL}</Text>
+                </View>
+                <View style={s.cell}>
+                  <Text>{stu.CLASS}</Text>
+                </View>
                 <View style={s.cell}>
                   <Checkbox value={stu.present} onValueChange={() => toggle(stu.key, 'present')} />
                 </View>
@@ -476,6 +514,7 @@ export default function AdminAttendance() {
           </View>
         </View>
       </Modal>
+
       <Modal visible={showAddModal} transparent animationType="slide">
         <View style={s.modalBg}>
           <View style={s.modal}>
@@ -483,7 +522,7 @@ export default function AdminAttendance() {
             <TextInput placeholder="Name" value={newName} onChangeText={setNewName} style={s.input} />
             <TextInput placeholder="Roll No" value={newRoll} onChangeText={setNewRoll} style={s.input} />
             <TextInput placeholder="Email ID" value={newEmail} onChangeText={setNewEmail} style={s.input} />
-            <Text style={s.static}>Class: {cls}</Text>
+            <Text style={s.static}>Class: {CLS}</Text>
             <View style={s.modalBtns}>
               <TouchableOpacity style={s.modalBtn} onPress={confirmAddStudent}>
                 <Text style={s.modalBtnTxt}>Confirm</Text>
@@ -496,9 +535,10 @@ export default function AdminAttendance() {
         </View>
       </Modal>
     </SafeAreaView>
-  )
+  );
 }
-//----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------------------
 const s = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#fff' },
   topBar: {
@@ -510,21 +550,45 @@ const s = StyleSheet.create({
   },
   topText: { marginRight: 16, fontWeight: 'bold' },
   topActions: { flexDirection: 'row', alignItems: 'center' },
-  importBtn: { paddingVertical: 8, paddingHorizontal: 10, backgroundColor: '#4e44ce', borderRadius: 4, marginLeft: 8 },
+  importBtn: {
+    paddingVertical: 8,
+    paddingHorizontal: 10,
+    backgroundColor: '#4e44ce',
+    borderRadius: 4,
+    marginLeft: 8
+  },
   importTxt: { color: '#fff' },
-  todayTopBtn: { marginLeft: 8, paddingVertical: 8, paddingHorizontal: 12, borderRadius: 6, backgroundColor: '#e5e7eb' },
+  todayTopBtn: {
+    marginLeft: 8,
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    borderRadius: 6,
+    backgroundColor: '#e5e7eb'
+  },
 
   calendarBox: {
-    width : 1300 , 
+    width: 1300,
     marginHorizontal: 4,
     borderRadius: 8,
     overflow: 'hidden',
     transform: [{ scale: 1.1 }],
     alignSelf: 'center'
   },
-  saveDayBtn: { backgroundColor: '#0ea5e9', padding: 12, borderRadius: 6, marginHorizontal: 16, marginTop: 10, alignSelf: 'flex-end' },
+  saveDayBtn: {
+    backgroundColor: '#0ea5e9',
+    padding: 12,
+    borderRadius: 6,
+    marginHorizontal: 16,
+    marginTop: 10,
+    alignSelf: 'flex-end'
+  },
   grid: { flex: 1 },
-  rowHeader: { flexDirection: 'row', backgroundColor: '#eee', borderBottomWidth: 1, borderColor: '#ccc' },
+  rowHeader: {
+    flexDirection: 'row',
+    backgroundColor: '#eee',
+    borderBottomWidth: 1,
+    borderColor: '#ccc'
+  },
   row: { flexDirection: 'row', borderBottomWidth: 1, borderColor: '#ddd' },
   cell: { flex: 1, minWidth: 242, padding: 8, borderRightWidth: 1, borderColor: '#ccc' },
   headerCell: { backgroundColor: '#ddd' },
@@ -539,10 +603,30 @@ const s = StyleSheet.create({
     paddingTop: 12,
     paddingBottom: 16
   },
-  saveRosterBtn: { backgroundColor: '#4e44ce', paddingVertical: 12, paddingHorizontal: 14, borderRadius: 6 },
-  downloadBtn: { backgroundColor: '#0ea5e9', paddingVertical: 12, paddingHorizontal: 14, borderRadius: 6 },
+  saveRosterBtn: {
+    backgroundColor: '#4e44ce',
+    paddingVertical: 12,
+    paddingHorizontal: 14,
+    borderRadius: 6
+  },
+  downloadBtn: {
+    backgroundColor: '#0ea5e9',
+    paddingVertical: 12,
+    paddingHorizontal: 14,
+    borderRadius: 6
+  },
   downloadTxt: { color: '#fff', fontWeight: 'bold' },
-  fab: { position: 'absolute', bottom: 24, right: 24, width: 56, height: 56, borderRadius: 28, backgroundColor: '#4e44ce', alignItems: 'center', justifyContent: 'center' },
+  fab: {
+    position: 'absolute',
+    bottom: 24,
+    right: 24,
+    width: 56,
+    height: 56,
+    borderRadius: 28,
+    backgroundColor: '#4e44ce',
+    alignItems: 'center',
+    justifyContent: 'center'
+  },
   fabTxt: { color: '#fff', fontSize: 32, lineHeight: 36 },
   centerFade: { flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: 'rgba(0,0,0,0.15)' },
   tickCard: { backgroundColor: '#fff', padding: 24, borderRadius: 16, alignItems: 'center' },
@@ -556,4 +640,4 @@ const s = StyleSheet.create({
   modalBtn: { flex: 1, padding: 12, backgroundColor: '#4d44cee3', borderRadius: 4, marginHorizontal: 4 },
   cancel: { backgroundColor: '#999' },
   modalBtnTxt: { color: '#fff', textAlign: 'center' }
-})
+});

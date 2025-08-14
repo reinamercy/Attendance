@@ -1,179 +1,165 @@
-import { useLocalSearchParams, useRouter } from 'expo-router'
-import { signOut } from 'firebase/auth'
+// app/admin/register.tsx
+import { useRouter } from "expo-router";
 import {
-  addDoc, collection, deleteDoc, doc, getDocs, query, where
-} from 'firebase/firestore'
-import React, { useEffect, useState } from 'react'
+  createUserWithEmailAndPassword,
+  fetchSignInMethodsForEmail,
+  updateProfile,
+} from "firebase/auth";
+import { doc, serverTimestamp, setDoc } from "firebase/firestore";
+import React, { useState } from "react";
 import {
-  Alert, FlatList, Modal, Platform, StyleSheet, Text, TextInput,
-  TouchableOpacity, View
-} from 'react-native'
-import { auth, db } from '../../firebase'
+  ActivityIndicator,
+  Alert,
+  KeyboardAvoidingView,
+  Platform,
+  StyleSheet,
+  Text,
+  TextInput,
+  TouchableOpacity,
+  View,
+} from "react-native";
+import { auth, db } from "../../firebase";
 
-type ClassItem = { id: string; name: string }
-
-export default function AdminDashboard() {
-  const router = useRouter()
-  const { mentor: mentorParam } = useLocalSearchParams<{ mentor: string }>()
-  const mentor = (mentorParam as string) || auth.currentUser?.email || ''
-
-  const [classes, setClasses] = useState<ClassItem[]>([])
-  const [modalVisible, setModalVisible] = useState(false)
-  const [department, setDepartment] = useState('')
-  const [section, setSection] = useState('')
-
-  const [confirmOpen, setConfirmOpen] = useState(false)
-  const [pending, setPending] = useState<ClassItem | null>(null)
-  const [busyId, setBusyId] = useState<string | null>(null)
-
-  const refresh = async () => {
-    if (!mentor) return
-    const qy = query(collection(db, 'classes'), where('mentor', '==', mentor))
-    const snapshot = await getDocs(qy)
-    setClasses(snapshot.docs.map(d => ({ id: d.id, name: (d.data() as any).name })))
+const show = (title: string, msg?: string, after?: () => void) => {
+  if (Platform.OS === 'web') {
+    // blocking alert on web; run callback after dismissal
+    (window as any)?.alert?.(msg ? `${title}\n\n${msg}` : title);
+    if (after) after();
+  } else {
+    // native: attach callback to OK button if provided
+    Alert.alert(title, msg, after ? [{ text: 'OK', onPress: after }] : undefined);
   }
+};
 
-  useEffect(() => { refresh() }, [mentor])
 
-  const addClass = async () => {
-    if (!department.trim() || !section.trim()) return
-    const name = `${department.trim()}-${section.trim()}`
-    if (classes.some(c => c.name === name)) {
-      setModalVisible(false); setDepartment(''); setSection(''); return
-    }
-    await addDoc(collection(db, 'classes'), { name, mentor, created: Date.now() })
-    setModalVisible(false); setDepartment(''); setSection('')
-    await refresh()
-  }
 
-  const performDelete = async (item: ClassItem) => {
+// Keep this if you still want to restrict teacher emails.
+// Remove ALLOWED check below if you don't want this filter here.
+const ALLOWED = /^[^@]*2005@gmail\.com$/;
+
+export default function Register() {
+  const r = useRouter();
+  const [name, setName] = useState("");
+  const [email, setEmail] = useState("");
+  const [pass, setPass] = useState("");
+  const [loading, setLoading] = useState(false);
+
+  const onRegister = async () => {
+    const e = email.trim().toLowerCase();
+    const n = name.trim();
+    const p = pass.trim();
+
+    if (!n) { show('Missing', 'Enter your full name'); return; }
+    if (!e || !e.includes('@')) { show('Invalid email', 'Enter a valid email'); return; }
+    if (p.length < 6) { show('Weak password', 'Use at least 6 characters'); return; }
+    if (!ALLOWED.test(e)) { show('Register with the organization mail!'); return; }
+
+
+
     try {
-      setBusyId(item.id)
-      await deleteDoc(doc(db, 'classes', item.id))
-      await refresh()
-    } catch (e: any) {
-      Alert.alert('Delete failed', e?.message ?? 'Unknown error')
+      setLoading(true);
+
+      // Block duplicate: if already registered, send to login
+      const methods = await fetchSignInMethodsForEmail(auth, e);
+      if (methods.length > 0) {
+        show('Already registered', 'Please log in.', () => r.replace('/admin/login'));
+        return;
+      }
+
+
+      // Create auth account
+      const cred = await createUserWithEmailAndPassword(auth, e, p);
+
+      // Optional: set display name
+      try { await updateProfile(cred.user, { displayName: n }); } catch {}
+
+      // Firestore: profile (by uid)
+      await setDoc(
+        doc(db, "users", cred.user.uid),
+        {
+          uid: cred.user.uid,
+          name: n,
+          email: e,
+          role: "admin",
+          createdAt: serverTimestamp(),
+        },
+        { merge: true }
+      );
+
+      // Firestore: whitelist (by email)
+      await setDoc(
+        doc(db, "allowedUsers", e),
+        { email: e, createdAt: serverTimestamp() },
+        { merge: true }
+      );
+
+      show('Account created', 'You can log in now.', () => r.replace('/admin/login'));
+
+    } catch (err: any) {
+      const msg = err?.message || String(err);
+      show('Registration failed', msg);
     } finally {
-      
-      setBusyId(null); setConfirmOpen(false); setPending(null)
+      setLoading(false);
     }
-  }
-  //const handleBack = () => {
-  const askDelete = (item: ClassItem) => {
-    if (Platform.OS === 'web') {
-      setPending(item); setConfirmOpen(true)
-    } else {
-      Alert.alert('Delete Class', `Are you sure you want to delete "${item.name}"?`, [
-        { text: 'Cancel', style: 'cancel' },
-        { text: 'Delete', style: 'destructive', onPress: () => performDelete(item) }
-      ])
-    }
-  }
-  
-  const doSignOut = async () => {
-    await signOut(auth)
-    router.replace('/')
-  }
+  };
 
   return (
-    <View style={styles.container}>
-      <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
-        <Text style={styles.title}>Admin Dashboard</Text>
-        <TouchableOpacity onPress={doSignOut} style={{ padding: 8, backgroundColor: '#eee', borderRadius: 6 }}>
-          <Text>Sign out</Text>
+    <KeyboardAvoidingView
+      style={styles.container}
+      behavior={Platform.OS === "ios" ? "padding" : undefined}
+    >
+      <View style={styles.card}>
+        <Text style={styles.title}>Create an account</Text>
+
+        <TextInput
+          style={styles.input}
+          placeholder="Full name"
+          autoCapitalize="words"
+          value={name}
+          onChangeText={setName}
+        />
+
+        <TextInput
+          style={styles.input}
+          placeholder="Email"
+          keyboardType="email-address"
+          autoCapitalize="none"
+          value={email}
+          onChangeText={setEmail}
+        />
+
+        <TextInput
+          style={styles.input}
+          placeholder="Password"
+          secureTextEntry
+          value={pass}
+          onChangeText={setPass}
+        />
+
+        <TouchableOpacity style={styles.btn} disabled={loading} onPress={onRegister}>
+          {loading ? <ActivityIndicator /> : <Text style={styles.btnText}>Register</Text>}
+        </TouchableOpacity>
+
+        <TouchableOpacity onPress={() => r.replace("/admin/login")}>
+          <Text style={styles.link}>Already have an account? Login</Text>
         </TouchableOpacity>
       </View>
-
-      <Text style={styles.mentor}>Logged in as: {mentor || '-'}</Text>
-      {classes.length === 0 && <Text style={styles.noClasses}>No classes created yet.</Text>}
-
-      <FlatList
-        data={classes}
-        keyExtractor={c => c.id}
-        contentContainerStyle={classes.length === 0 ? { flex: 1, justifyContent: 'center', alignItems: 'center' } : undefined}
-        renderItem={({ item }) => (
-          <View style={styles.row}>
-            <TouchableOpacity
-              style={[styles.classBtn, { flex: 1, marginRight: 8 }]}
-              onPress={() => router.push({ pathname: '/admin/attendance', params: { cls: item.name, mentor } })}
-            >
-              <Text style={styles.classTxt}>{item.name}</Text>
-            </TouchableOpacity>
-
-            <TouchableOpacity
-              style={[styles.deleteBtn, busyId === item.id && { opacity: 0.5 }]}
-              disabled={busyId === item.id}
-              onPress={() => askDelete(item)}
-            >
-              <Text style={styles.deleteTxt}>Delete</Text>
-            </TouchableOpacity>
-          </View>
-        )}
-      />
-
-      <TouchableOpacity style={styles.fab} onPress={() => setModalVisible(true)}>
-        <Text style={styles.fabTxt}>+ Create New Class</Text>
-      </TouchableOpacity>
-
-      <Modal visible={modalVisible} transparent animationType="fade">
-        <View style={styles.modalBg}>
-          <View style={styles.modal}>
-            <Text style={styles.modalTitle}>New Class</Text>
-            <TextInput placeholder="Department (e.g. CSE)" value={department} onChangeText={setDepartment} style={styles.input}/>
-            <TextInput placeholder="Section (e.g. C)" value={section} onChangeText={setSection} style={styles.input}/>
-            <View style={styles.modalBtns}>
-              <TouchableOpacity style={styles.modalBtn} onPress={addClass}>
-                <Text style={styles.modalBtnTxt}>Confirm</Text>
-              </TouchableOpacity>
-              <TouchableOpacity style={[styles.modalBtn, styles.cancel]} onPress={() => setModalVisible(false)}>
-                <Text style={styles.modalBtnTxt}>Cancel</Text>
-              </TouchableOpacity>
-            </View>
-          </View>
-        </View>
-      </Modal>
-
-      <Modal visible={confirmOpen} transparent animationType="fade">
-        <View style={styles.modalBg}>
-          <View style={styles.modal}>
-            <Text style={styles.modalTitle}>Delete Class</Text>
-            <Text style={{ marginBottom: 12 }}>
-              Are you sure you want to delete "{pending?.name}"?
-            </Text>
-            <View style={styles.modalBtns}>
-              <TouchableOpacity style={[styles.modalBtn, { backgroundColor: '#e53935' }]} onPress={() => pending && performDelete(pending)}>
-                <Text style={styles.modalBtnTxt}>Delete</Text>
-              </TouchableOpacity>
-              <TouchableOpacity style={[styles.modalBtn, styles.cancel]} onPress={() => setConfirmOpen(false)}>
-                <Text style={styles.modalBtnTxt}>Cancel</Text>
-              </TouchableOpacity>
-            </View>
-          </View>
-        </View>
-      </Modal>
-    </View>
-  )
+    </KeyboardAvoidingView>
+  );
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, padding: 20, paddingTop: 60, backgroundColor: '#fff' },
-  title: { fontSize: 24, fontWeight: 'bold', marginBottom: 8 },
-  mentor: { fontSize: 16, marginBottom: 16, color: '#333' },
-  noClasses: { textAlign: 'center', fontSize: 16, color: '#666' },
-  row: { flexDirection: 'row', alignItems: 'center', marginBottom: 12 },
-  classBtn: { padding: 16, backgroundColor: '#4e44ce', borderRadius: 8 },
-  classTxt: { color: '#fff', textAlign: 'center', fontSize: 18 },
-  deleteBtn: { paddingVertical: 12, paddingHorizontal: 14, backgroundColor: '#e53935', borderRadius: 8 },
-  deleteTxt: { color: '#fff', fontWeight: 'bold' },
-  fab: { position: 'absolute', bottom: 20, left: 20, right: 20, padding: 16, backgroundColor: '#7874b3ff', borderRadius: 8 },
-  fabTxt: { color: '#fff', textAlign: 'center', fontSize: 16, fontWeight: 'bold' },
-  modalBg: { flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'center', alignItems: 'center' },
-  modal: { width: '80%', backgroundColor: '#fff', padding: 20, borderRadius: 8 },
-  modalTitle: { fontSize: 20, fontWeight: 'bold', marginBottom: 12 },
-  input: { borderWidth: 1, borderColor: '#ccc', padding: 10, borderRadius: 4, marginBottom: 12 },
-  modalBtns: { flexDirection: 'row', justifyContent: 'space-between' },
-  modalBtn: { flex: 1, padding: 12, backgroundColor: '#4e44ce', borderRadius: 4, marginHorizontal: 4 },
-  cancel: { backgroundColor: '#999' },
-  modalBtnTxt: { color: '#fff', textAlign: 'center', fontWeight: 'bold' }
-  
-})
+  container: { flex: 1, padding: 24, justifyContent: "center", backgroundColor: "#0b0b0c" },
+  card: { backgroundColor: "#151518", padding: 20, borderRadius: 16, gap: 12 },
+  title: { fontSize: 22, fontWeight: "700", color: "#fff", marginBottom: 4, textAlign: "center" },
+  input: {
+    backgroundColor: "#1e1e23",
+    borderRadius: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 12,
+    color: "#fff",
+  },
+  btn: { backgroundColor: "#635bff", borderRadius: 10, paddingVertical: 14, alignItems: "center" },
+  btnText: { color: "#fff", fontWeight: "700" },
+  link: { color: "#9aa0a6", textAlign: "center", marginTop: 10 },
+});

@@ -1,15 +1,32 @@
+// app/admin/login.tsx
 import { useRouter } from 'expo-router'
 import {
-    createUserWithEmailAndPassword,
-    GoogleAuthProvider,
-    signInWithEmailAndPassword,
-    signInWithPopup,
-    signOut
+  fetchSignInMethodsForEmail, GoogleAuthProvider,
+  signInWithEmailAndPassword,
+  signInWithPopup,
+  signOut
 } from 'firebase/auth'
-import { doc, setDoc } from 'firebase/firestore'
+import { doc, getDoc, serverTimestamp, setDoc } from 'firebase/firestore'
 import React, { useState } from 'react'
-import { Alert, Platform, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native'
+import {
+  Alert,
+  Platform,
+  StyleSheet,
+  Text,
+  TextInput,
+  TouchableOpacity,
+  View
+} from 'react-native'
 import { auth, db } from '../../firebase'
+const show = (title: string, msg?: string) => {
+  if (Platform.OS === 'web') {
+    // @ts-ignore
+    (window as any)?.alert?.(msg ? `${title}\n\n${msg}` : title);
+  } else {
+    Alert.alert(title, msg);
+  }
+};
+
 
 // Only allow emails like ******2005@gmail.com
 const ALLOWED = /^[^@]*2005@gmail\.com$/
@@ -21,13 +38,11 @@ export default function AdminLogin() {
   const [busy, setBusy] = useState(false)
 
   const finishLogin = async (e: string) => {
-    try { await auth.currentUser?.getIdToken(true) } catch {}
-    // upsert admin profile
     try {
       if (auth.currentUser?.uid) {
         await setDoc(
           doc(db, 'admins', auth.currentUser.uid),
-          { email: e, createdAt: Date.now() },
+          { email: e, uid: auth.currentUser.uid, createdAt: serverTimestamp() },
           { merge: true }
         )
       }
@@ -35,54 +50,58 @@ export default function AdminLogin() {
     router.replace({ pathname: '/admin/dashboard', params: { mentor: e } })
   }
 
-  const handleLogin = async () => {
-    const e = email.trim()
-    const p = password.trim()
+  const checkWhitelist = async (e: string) => {
+    const snap = await getDoc(doc(db, 'allowedUsers', e))
+    return snap.exists()
+  }
 
-    if (!e || !p) return Alert.alert('Missing', 'Enter email & password')
-    if (!ALLOWED.test(e)) return Alert.alert('Access blocked', 'Only teacher emails ending with 2005@gmail.com are allowed for now.')
-    if (p.length < 6) {
-      return Alert.alert('Password too short', 'Use at least 6 characters (needed if this creates your account).')
+const handleLogin = async () => {
+  const e = email.trim().toLowerCase()
+  const p = password.trim()
+
+  if (!e || !p) { show('Missing', 'Enter email & password'); return }
+  if (!ALLOWED.test(e)) { show('Access blocked', 'Only teacher emails ending with 2005@gmail.com are allowed for now.'); return }
+  if (p.length < 6) { show('Password too short', 'Use at least 6 characters.'); return }
+
+  try {
+    setBusy(true)
+    await signInWithEmailAndPassword(auth, e, p)
+
+    const ok = await checkWhitelist(e)
+    if (!ok) {
+      await signOut(auth)
+      show('Access denied', 'This email is not registered. Please register first.')
+      return
     }
 
-    try {
-      setBusy(true)
-      // Try normal sign-in first
-      await signInWithEmailAndPassword(auth, e, p)
-      return finishLogin(e)
-    } catch (err: any) {
+    return finishLogin(e)
+  } catch (err: any) {
       const code = err?.code || ''
-      // If the user doesn't exist yet, auto-create the account
-      if (code === 'auth/user-not-found') {
-        try {
-          const cred = await createUserWithEmailAndPassword(auth, e, p)
-          await setDoc(doc(db, 'admins', cred.user.uid), { email: e, createdAt: Date.now() }, { merge: true })
-          return finishLogin(e)
-        } catch (err2: any) {
-          const msg2 = err2?.message || String(err2)
-          return Alert.alert('Registration failed', msg2)
-        } finally {
-          setBusy(false)
+
+      // explicit case (if it ever comes through)
+      if (code === 'auth/user-not-found') { show('Oops! User not found. Register to begin'); return }
+
+      // Firebase sometimes returns this for both wrong password AND unknown user
+      if (code === 'auth/invalid-credential') {
+        const methods = await fetchSignInMethodsForEmail(auth, e)
+        if (methods.length === 0) {
+          show('Oops! User not found. Register to begin')
+          return
         }
+        show('Wrong password', 'Check your password and try again.')
+        return
       }
 
-      // Helpful errors for common cases
-      if (code === 'auth/operation-not-allowed') {
-        return Alert.alert('Enable Email/Password', 'In Firebase Console > Authentication > Sign-in method, enable "Email/Password".')
-      }
-      if (code === 'auth/invalid-credential' || code === 'auth/wrong-password') {
-        return Alert.alert('Wrong password', 'Check your password and try again.')
-      }
-      if (code === 'auth/too-many-requests') {
-        return Alert.alert('Too many attempts', 'Please wait a minute and try again.')
-      }
+      if (code === 'auth/wrong-password') { show('Wrong password', 'Check your password and try again.'); return }
+      if (code === 'auth/too-many-requests') { show('Too many attempts', 'Please wait a minute and try again.'); return }
 
       const msg = err instanceof Error ? err.message : String(err)
-      Alert.alert('Login failed', msg)
+      show('Login failed', msg)
     } finally {
-      setBusy(false)
-    }
+
+    setBusy(false)
   }
+}
 
   const handleGoogle = async () => {
     if (Platform.OS !== 'web') {
@@ -129,22 +148,93 @@ export default function AdminLogin() {
       />
 
       <TouchableOpacity style={[s.button, busy && { opacity: 0.6 }]} onPress={handleLogin} disabled={busy}>
-        <Text style={s.buttonText}>{busy ? 'Working…' : 'Login / Create'}</Text>
+        <Text style={s.buttonText}>{busy ? 'Working…' : 'Login'}</Text>
       </TouchableOpacity>
 
-      <TouchableOpacity style={[s.ghostBtn, { marginTop: 12 }]} onPress={handleGoogle}>
-        <Text style={s.ghostTxt}>Continue with Google</Text>
+      <TouchableOpacity style={[s.ghostBtn, { marginTop: 12 }]} onPress={handleGoogle} disabled={busy}>
+        <Text style={s.ghostTxt}>Continue with Google (Web)</Text>
+      </TouchableOpacity>
+
+      <TouchableOpacity style={s.linkBtn} onPress={() => router.replace('/admin/register')}>
+        <Text style={s.linkTxt}>New here? Create an account</Text>
       </TouchableOpacity>
     </View>
   )
 }
 
 const s = StyleSheet.create({
-  container: { flex: 1, justifyContent: 'center', padding: 20, backgroundColor: '#fff' },
-  title: { fontSize: 24, fontWeight: 'bold', marginBottom: 20, textAlign: 'center' },
-  input: { borderWidth: 1, borderColor: '#ccc', padding: 12, borderRadius: 6, marginBottom: 12 },
-  button: { padding: 14, backgroundColor: '#4e44ce', borderRadius: 6 },
-  buttonText: { color: '#fff', textAlign: 'center', fontWeight: 'bold' },
-  ghostBtn: { padding: 10 },
-  ghostTxt: { textAlign: 'center', color: '#4e44ce', fontWeight: '600' }
+  // Page
+  container: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingHorizontal: 24,
+    paddingVertical: 40,
+    backgroundColor: '#F6F8FC',
+  },
+
+  // Heading
+  title: {
+    fontSize: 24,
+    fontWeight: '800',
+    color: '#0f172a',
+    textAlign: 'center',
+    marginBottom: 18,
+  },
+
+  // Inputs — full-width with clear borders
+  input: {
+    width: '100%',
+    maxWidth: 520,
+    height: 54,
+    borderWidth: 2,
+    borderColor: '#CBD5E1',
+    backgroundColor: '#FFFFFF',
+    color: '#0f172a',
+    borderRadius: 14,
+    paddingHorizontal: 16,
+    marginBottom: 16,
+  },
+
+  // Primary button (Sign In)
+  button: {
+    width: '100%',
+    maxWidth: 520,
+    height: 54,
+    borderRadius: 14,
+    backgroundColor: '#0F172A',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginTop: 4,
+    marginBottom: 14,
+  },
+  buttonText: {
+    color: '#FFFFFF',
+    fontSize: 16,
+    fontWeight: '700',
+  },
+
+  // Google button (outlined)
+  ghostBtn: {
+    width: '100%',
+    maxWidth: 520,
+    height: 54,
+    borderRadius: 14,
+    borderWidth: 2,
+    borderColor: '#E5E7EB',
+    backgroundColor: '#FFFFFF',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginTop: 12,
+  },
+  ghostTxt: {
+    textAlign: 'center',
+    color: '#0f172a',
+    fontSize: 15,
+    fontWeight: '600',
+  },
+
+  // Footer link
+  linkBtn: { paddingVertical: 10, marginTop: 20 },
+  linkTxt: { textAlign: 'center', color: '#0f172a', opacity: 0.8 },
 })
