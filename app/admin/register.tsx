@@ -2,9 +2,18 @@
 import { useRouter } from "expo-router";
 import {
   createUserWithEmailAndPassword,
-  fetchSignInMethodsForEmail,
+  EmailAuthProvider,
+  fetchSignInMethodsForEmail, // ← add
+  getRedirectResult,
+  GoogleAuthProvider,
+  linkWithCredential,
+  signInWithPopup,
+  signInWithRedirect, // ← add
+  signOut,
   updateProfile,
 } from "firebase/auth";
+
+
 import { doc, serverTimestamp, setDoc } from "firebase/firestore";
 import React, { useState } from "react";
 import {
@@ -19,6 +28,8 @@ import {
   View,
 } from "react-native";
 import { auth, db } from "../../firebase";
+
+
 
 const show = (title: string, msg?: string, after?: () => void) => {
   if (Platform.OS === 'web') {
@@ -44,64 +55,182 @@ export default function Register() {
   const [pass, setPass] = useState("");
   const [loading, setLoading] = useState(false);
 
-  const onRegister = async () => {
-    const e = email.trim().toLowerCase();
-    const n = name.trim();
-    const p = pass.trim();
+  React.useEffect(() => {
+  if (Platform.OS !== "web") return;
+  (async () => {
+    const res = await getRedirectResult(auth);
+    if (!res) return;
 
-    if (!n) { show('Missing', 'Enter your full name'); return; }
-    if (!e || !e.includes('@')) { show('Invalid email', 'Enter a valid email'); return; }
-    if (p.length < 6) { show('Weak password', 'Use at least 6 characters'); return; }
-    if (!ALLOWED.test(e)) { show('Register with the organization mail!'); return; }
+    const eLS = (localStorage.getItem("LINK_E") || "").toLowerCase();
+    const pLS = localStorage.getItem("LINK_P") || "";
+    const nLS = localStorage.getItem("LINK_N") || "";
+    localStorage.removeItem("LINK_E");
+    localStorage.removeItem("LINK_P");
+    localStorage.removeItem("LINK_N");
+    if (!eLS || !pLS) return;
 
-
+    const signedEmail = (res.user.email || "").toLowerCase();
+    if (signedEmail !== eLS) {
+      await signOut(auth);
+      show("Wrong Google account", `Please sign in with Google as ${eLS} and try again.`);
+      return;
+    }
 
     try {
-      setLoading(true);
+      const cred = EmailAuthProvider.credential(eLS, pLS);
+      await linkWithCredential(res.user, cred);
 
-      // Block duplicate: if already registered, send to login
-      const methods = await fetchSignInMethodsForEmail(auth, e);
-      if (methods.length > 0) {
-        show('Already registered', 'Please log in.', () => r.replace('/admin/login'));
+      await Promise.all([
+        setDoc(doc(db, "users", res.user.uid), {
+          uid: res.user.uid, name: nLS || res.user.displayName || "Admin",
+          email: eLS, role: "admin", createdAt: serverTimestamp(),
+        }, { merge: true }),
+        setDoc(doc(db, "allowedUsers", eLS), { email: eLS, createdAt: serverTimestamp() }, { merge: true }),
+      ]);
+
+      await signOut(auth);
+      show("Account linked", "You can now login with email & password too.", () => r.replace("/admin/login"));
+    } catch (e:any) {
+      show("Registration failed", e?.message || String(e));
+    }
+  })();
+}, []);
+
+// Try popup first; if blocked → fall back to redirect.
+// We stash info in localStorage so we can finish linking after redirect.
+const googlePopupOrRedirect = async (e: string, n: string, p: string) => {
+  const provider = new GoogleAuthProvider();
+  try {
+    const res = await signInWithPopup(auth, provider);
+    return res.user; // success via popup
+  } catch (err: any) {
+    if (err?.code === "auth/popup-blocked" || err?.code === "auth/popup-closed-by-user") {
+      if (Platform.OS !== "web") throw err;
+      localStorage.setItem("LINK_E", e);
+      localStorage.setItem("LINK_P", p);
+      localStorage.setItem("LINK_N", n);
+      await signInWithRedirect(auth, provider); // page navigates
+      return null;
+    }
+    throw err;
+  }
+};
+// Detect Safari (incl. iOS Safari)
+const isSafari = () =>
+  typeof navigator !== "undefined" &&
+  /Safari/i.test(navigator.userAgent) &&
+  !/Chrome|CriOS|FxiOS/i.test(navigator.userAgent);
+
+// Start Google **redirect** (no popup, works in Safari)
+const startGoogleRedirect = async (e: string, n: string, p: string) => {
+  const provider = new GoogleAuthProvider();
+  provider.setCustomParameters({ login_hint: e, prompt: "select_account" });
+
+  // stash so we can finish linking after redirect
+  localStorage.setItem("LINK_E", e);
+  localStorage.setItem("LINK_P", p);
+  localStorage.setItem("LINK_N", n);
+
+  await signInWithRedirect(auth, provider); // navigates away
+};
+
+const onRegister = async () => {
+  const e = email.trim().toLowerCase();
+  const n = name.trim();
+  const p = pass.trim();
+
+  if (!n) { show('Missing', 'Enter your full name'); return; }
+  if (!e || !e.includes('@')) { show('Invalid email', 'Enter a valid email'); return; }
+  if (p.length < 6) { show('Weak password', 'Use at least 6 characters'); return; }
+  if (!ALLOWED.test(e)) { show('Register with the organization mail!'); return; }
+
+  try {
+    setLoading(true);
+    const methods = await fetchSignInMethodsForEmail(auth, e);
+
+    // A) Email is Google-only → prove ownership and LINK password to the same uid
+    if (methods.includes('google.com') && !methods.includes('password')) {
+      if (Platform.OS !== 'web') {
+        show('Google required', 'Open this screen on Web, sign in with Google, then set a password here.');
         return;
       }
 
+      const provider = new GoogleAuthProvider();
+      provider.setCustomParameters({ login_hint: e, prompt: 'select_account' });
 
-      // Create auth account
-      const cred = await createUserWithEmailAndPassword(auth, e, p);
+      try {
+        // try popup first (Chrome/Edge) …
+        const res = await signInWithPopup(auth, provider);
+        const signedEmail = (res.user.email || '').toLowerCase();
+        if (signedEmail !== e) {
+          await signOut(auth);
+          show('Wrong Google account', `Please sign in with Google as ${e} and try again.`);
+          return;
+        }
 
-      // Optional: set display name
-      try { await updateProfile(cred.user, { displayName: n }); } catch {}
+        const credential = EmailAuthProvider.credential(e, p);
+        await linkWithCredential(res.user, credential);
 
-      // Firestore: profile (by uid)
-      await setDoc(
-        doc(db, "users", cred.user.uid),
-        {
-          uid: cred.user.uid,
-          name: n,
-          email: e,
-          role: "admin",
-          createdAt: serverTimestamp(),
-        },
-        { merge: true }
-      );
+        await Promise.all([
+          setDoc(doc(db, 'users', res.user.uid), {
+            uid: res.user.uid, name: n, email: e, role: 'admin', createdAt: serverTimestamp(),
+          }, { merge: true }),
+          setDoc(doc(db, 'allowedUsers', e), { email: e, createdAt: serverTimestamp() }, { merge: true }),
+        ]);
 
-      // Firestore: whitelist (by email)
-      await setDoc(
-        doc(db, "allowedUsers", e),
-        { email: e, createdAt: serverTimestamp() },
-        { merge: true }
-      );
-
-      show('Account created', 'You can log in now.', () => r.replace('/admin/login'));
-
-    } catch (err: any) {
-      const msg = err?.message || String(err);
-      show('Registration failed', msg);
-    } finally {
-      setLoading(false);
+        await signOut(auth);
+        show('Account linked', 'You can now login with email & password too.', () => r.replace('/admin/login'));
+        return;
+      } catch (popupErr: any) {
+        // …if popup blocked (Safari/Firefox), fall back to redirect
+        if (popupErr?.code === 'auth/popup-blocked' || popupErr?.code === 'auth/popup-closed-by-user') {
+          localStorage.setItem('LINK_E', e);
+          localStorage.setItem('LINK_P', p);
+          localStorage.setItem('LINK_N', n);
+          await signInWithRedirect(auth, provider); // navigates; finish in getRedirectResult useEffect
+          return;
+        }
+        throw popupErr;
+      }
     }
-  };
+
+    // B) Already has password (or already linked)
+    if (methods.length > 0) {
+      show('Already registered', 'Please log in.', () => r.replace('/admin/login'));
+      return;
+    }
+
+    // C) Fresh create
+    const cred = await createUserWithEmailAndPassword(auth, e, p);
+    try { await updateProfile(cred.user, { displayName: n }); } catch {}
+
+    await Promise.all([
+      setDoc(doc(db, 'users', cred.user.uid), {
+        uid: cred.user.uid, name: n, email: e, role: 'admin', createdAt: serverTimestamp(),
+      }, { merge: true }),
+      setDoc(doc(db, 'allowedUsers', e), { email: e, createdAt: serverTimestamp() }, { merge: true }),
+    ]);
+
+    await signOut(auth);
+    show('Account created', 'You can log in now.', () => r.replace('/admin/login'));
+  } catch (err: any) {
+    // D) Safety net: if create raced and email already exists, do the Google redirect linker
+    if (err?.code === 'auth/email-already-in-use' && Platform.OS === 'web') {
+      const provider = new GoogleAuthProvider();
+      provider.setCustomParameters({ login_hint: e, prompt: 'select_account' });
+      localStorage.setItem('LINK_E', e);
+      localStorage.setItem('LINK_P', p);
+      localStorage.setItem('LINK_N', n);
+      await signInWithRedirect(auth, provider);
+      return;
+    }
+    const msg = err?.message || String(err);
+    show('Registration failed', msg);
+  } finally {
+    setLoading(false);
+  }
+};
+
 
   return (
     <KeyboardAvoidingView
@@ -149,17 +278,93 @@ export default function Register() {
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, padding: 24, justifyContent: "center", backgroundColor: "#0b0b0c" },
-  card: { backgroundColor: "#151518", padding: 20, borderRadius: 16, gap: 12 },
-  title: { fontSize: 22, fontWeight: "700", color: "#fff", marginBottom: 4, textAlign: "center" },
-  input: {
-    backgroundColor: "#1e1e23",
-    borderRadius: 10,
-    paddingHorizontal: 12,
-    paddingVertical: 12,
-    color: "#fff",
+  // Page — dark like original
+  container: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingHorizontal: 24,
+    paddingVertical: 40,
+    backgroundColor: '#FFFFFF',
   },
-  btn: { backgroundColor: "#635bff", borderRadius: 10, paddingVertical: 14, alignItems: "center" },
-  btnText: { color: "#fff", fontWeight: "700" },
-  link: { color: "#9aa0a6", textAlign: "center", marginTop: 10 },
-});
+
+  // Card wrapper
+  card: {
+    width: '100%',
+    maxWidth: 560,
+    backgroundColor: '#000080',
+    borderRadius: 16,
+    borderWidth: 1.5,
+    borderColor: '#FFFFFF',
+    padding: 20,
+  },
+
+  // Heading
+  title: {
+    fontSize: 24,
+    fontWeight: '800',
+    color: '#E5E7EB',
+    textAlign: 'center',
+    marginBottom: 18,
+  },
+
+  // Inputs — white borders now
+  input: {
+    width: '100%',
+    height: 54,
+    borderWidth: 2,
+    borderColor: '#FFFFFF',          // was blue → now white
+    backgroundColor: '#000080',
+    color: '#E5E7EB',
+    borderRadius: 14,
+    paddingHorizontal: 16,
+    marginBottom: 16,
+  },
+
+  // Primary button — white box with blue text
+  btn: {
+    width: '100%',
+    height: 54,
+    borderRadius: 14,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginTop: 4,
+    marginBottom: 14,
+    backgroundColor: '#FFFFFF',      // was blue → now white
+    borderWidth: 2,
+    borderColor: '#FFFFFF',
+  },
+  btnText: {
+    color: 'rgb(14, 7, 122)',        // was white → now brand blue
+    fontSize: 16,
+    fontWeight: '700',
+  },
+
+  // Footer link — flip to blue
+  link: {
+    textAlign: 'center',
+    color: 'rgb(255, 255, 255)',        // was light → now blue
+    opacity: 1,
+    marginTop: 10,
+    fontWeight: '700',
+  },
+
+  // Optional: outlined alt button (e.g., “Register with Google”) — white border, blue text
+  ghostBtn: {
+    width: '100%',
+    height: 54,
+    borderRadius: 14,
+    borderWidth: 2,
+    borderColor: '#FFFFFF',          // was dark → now white
+    backgroundColor: '#111216',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginTop: 12,
+  },
+  ghostTxt: {
+    textAlign: 'center',
+    color: 'rgb(14, 7, 122)',        // was near-white → now blue
+    fontSize: 15,
+    fontWeight: '700',
+  },
+})

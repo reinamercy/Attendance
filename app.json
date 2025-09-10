@@ -9,14 +9,19 @@
     "userInterfaceStyle": "automatic",
     "newArchEnabled": true,
     "ios": {
-      "supportsTablet": true
+      "supportsTablet": true,
+      "bundleIdentifier": "com.rahul.attendance",
+      "infoPlist": {
+        "ITSAppUsesNonExemptEncryption": false
+      }
     },
     "android": {
       "adaptiveIcon": {
         "foregroundImage": "./assets/images/adaptive-icon.png",
         "backgroundColor": "#ffffff"
       },
-      "edgeToEdgeEnabled": true
+      "edgeToEdgeEnabled": true,
+      "package": "com.rahul.attendance"
     },
     "web": {
       "bundler": "metro",
@@ -34,10 +39,21 @@
           "backgroundColor": "#ffffff"
         }
       ],
-      "expo-secure-store"
+      "expo-web-browser"
     ],
     "experiments": {
       "typedRoutes": true
+    },
+    "extra": {
+      "google": {
+        "webClientId": "488809231478-qta3q53tuoqudoek4cb5rvk828oha17a.apps.googleusercontent.com",
+        "androidClientId": "488809231478-u0mqgfdqrio28in8oi43ouqm9sqju43g.apps.googleusercontent.com",
+        "iosClientId": ""
+      },
+      "router": {},
+      "eas": {
+        "projectId": "3dcf8eee-3bf5-43aa-a630-916f9c29971d"
+      }
     }
   }
 }

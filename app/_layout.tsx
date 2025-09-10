@@ -9,7 +9,8 @@ export default function RootLayout() {
       <Stack.Screen name="admin/register" />
       <Stack.Screen name="admin/dashboard" />
       <Stack.Screen name="admin/attendance" />
-      
+      {/* 👇 Add this so /hod/* mounts its own _layout */}
+      <Stack.Screen name="hod" />
     </Stack>
   )
 }
